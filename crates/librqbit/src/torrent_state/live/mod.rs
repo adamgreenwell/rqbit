@@ -754,7 +754,10 @@ impl TorrentStateLive {
                 .filter(|e| filter.state.matches(e.value().get_state()))
                 .map(|e| {
                     let total = self.lengths.total_pieces();
-                    (e.key().to_string(), PeerStats::from_peer(e.value(), total))
+                    (
+                        e.key().to_string(),
+                        PeerStats::from_peer(e.value(), total, filter.include_bitfield),
+                    )
                 })
                 .collect(),
         }

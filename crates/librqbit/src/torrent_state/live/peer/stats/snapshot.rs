@@ -37,6 +37,12 @@ pub struct PeerStats {
     /// public API. `counters.downloaded_and_checked_pieces` answers a
     /// different question: how many pieces this peer sent *us*.
     pub have_pieces: Option<u32>,
+    /// The peer's bitfield, as the bytes it sent.
+    ///
+    /// `None` unless [`PeerStatsFilter::include_bitfield`] was set and the
+    /// peer is live. Trailing bits past `total_pieces` are spare and must be
+    /// ignored — see [`PeerStats::from_peer`].
+    pub have_bitfield: Option<Vec<u8>>,
 }
 
 impl PeerStats {
@@ -47,7 +53,7 @@ impl PeerStats {
     /// the last real piece are spare. The spec says a peer must zero them,
     /// but `on_bitfield` only validates the byte *length*, so a peer that
     /// sets them would otherwise inflate the count by up to 7.
-    pub(crate) fn from_peer(peer: &Peer, total_pieces: u32) -> Self {
+    pub(crate) fn from_peer(peer: &Peer, total_pieces: u32, include_bitfield: bool) -> Self {
         let state = peer.get_state();
         Self {
             counters: peer.stats.counters.as_ref().into(),
@@ -62,6 +68,10 @@ impl PeerStats {
             },
             have_pieces: match state {
                 PeerState::Live(l) => Some(count_have_pieces(&l.bitfield, total_pieces)),
+                _ => None,
+            },
+            have_bitfield: match state {
+                PeerState::Live(l) if include_bitfield => Some(l.bitfield.as_raw_slice().to_vec()),
                 _ => None,
             },
         }
@@ -159,4 +169,12 @@ impl PeerStatsFilterState {
 pub struct PeerStatsFilter {
     #[serde(default)]
     pub state: PeerStatsFilterState,
+    /// Include each peer's raw bitfield in `have_bitfield`.
+    ///
+    /// Off by default: it costs a byte per eight pieces per peer, which is
+    /// waste for the many callers that only want `have_pieces`. Turn it on to
+    /// compute per-piece availability across the swarm, which needs to know
+    /// *which* pieces each peer holds rather than how many.
+    #[serde(default)]
+    pub include_bitfield: bool,
 }
