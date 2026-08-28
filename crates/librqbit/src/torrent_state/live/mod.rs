@@ -104,7 +104,7 @@ use self::{
         PeerRx, PeerState, PeerTx, RemoveInflightRequestResult,
         stats::{
             atomic::PeerCountersAtomic as AtomicPeerCounters,
-            snapshot::{PeerStatsFilter, PeerStatsSnapshot},
+            snapshot::{PeerStats, PeerStatsFilter, PeerStatsSnapshot},
         },
     },
     peers::PeerStates,
@@ -752,7 +752,10 @@ impl TorrentStateLive {
                 .states
                 .iter()
                 .filter(|e| filter.state.matches(e.value().get_state()))
-                .map(|e| (e.key().to_string(), e.value().into()))
+                .map(|e| {
+                    let total = self.lengths.total_pieces();
+                    (e.key().to_string(), PeerStats::from_peer(e.value(), total))
+                })
                 .collect(),
         }
     }

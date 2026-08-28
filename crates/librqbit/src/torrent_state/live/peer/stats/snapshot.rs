@@ -29,6 +29,87 @@ pub struct PeerStats {
     pub state: &'static str,
     pub conn_kind: Option<ConnectionKind>,
     pub client_name: Option<String>,
+    /// How many pieces this peer has, from the bitfield tracked for piece
+    /// picking. `None` when the peer is not live and so has no bitfield.
+    ///
+    /// Lets an embedder compute piece availability across the swarm — the
+    /// rarest-piece copy count — which is otherwise not derivable from the
+    /// public API. `counters.downloaded_and_checked_pieces` answers a
+    /// different question: how many pieces this peer sent *us*.
+    pub have_pieces: Option<u32>,
+}
+
+impl PeerStats {
+    /// Builds a snapshot for one peer.
+    ///
+    /// `total_pieces` is needed because a peer's bitfield is stored as the
+    /// bytes it sent, and a bitfield is byte-padded: the trailing bits past
+    /// the last real piece are spare. The spec says a peer must zero them,
+    /// but `on_bitfield` only validates the byte *length*, so a peer that
+    /// sets them would otherwise inflate the count by up to 7.
+    pub(crate) fn from_peer(peer: &Peer, total_pieces: u32) -> Self {
+        let state = peer.get_state();
+        Self {
+            counters: peer.stats.counters.as_ref().into(),
+            state: state.name(),
+            conn_kind: match state {
+                PeerState::Live(l) => Some(l.connection_kind),
+                _ => None,
+            },
+            client_name: match state {
+                PeerState::Live(l) => l.client_name.clone(),
+                _ => None,
+            },
+            have_pieces: match state {
+                PeerState::Live(l) => Some(count_have_pieces(&l.bitfield, total_pieces)),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Counts the pieces a peer claims, ignoring the bitfield's spare trailing
+/// bits.
+///
+/// See the note on [`PeerStats::from_peer`] for why the raw
+/// `bitfield.count_ones()` is not correct here. The `min` guards the slice:
+/// `on_bitfield` rejects a bitfield of the wrong byte length, so the two
+/// should agree, but a panic here would take down a stats call.
+fn count_have_pieces(bitfield: &crate::type_aliases::BF, total_pieces: u32) -> u32 {
+    let end = (total_pieces as usize).min(bitfield.len());
+    bitfield[..end].count_ones() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_have_pieces;
+    use crate::type_aliases::BF;
+
+    /// A peer that sets the spare trailing bits must not inflate the count.
+    ///
+    /// The spec says those bits are zero, but `on_bitfield` only validates the
+    /// byte length, so this is reachable from the wire.
+    #[test]
+    fn ignores_padding_bits() {
+        // 10 pieces needs 2 bytes, leaving 6 spare bits. Claim 3 real pieces
+        // and then set every spare bit.
+        let bf = BF::from_boxed_slice(vec![0b1110_0000, 0b0011_1111].into_boxed_slice());
+        assert_eq!(count_have_pieces(&bf, 10), 3);
+        // Counting the whole bitfield is what we are guarding against.
+        assert_eq!(bf.count_ones(), 9);
+    }
+
+    #[test]
+    fn counts_a_seed_as_every_piece() {
+        let bf = BF::from_boxed_slice(vec![0xff, 0xff].into_boxed_slice());
+        assert_eq!(count_have_pieces(&bf, 10), 10);
+    }
+
+    #[test]
+    fn counts_an_empty_peer_as_none() {
+        let bf = BF::from_boxed_slice(vec![0x00, 0x00].into_boxed_slice());
+        assert_eq!(count_have_pieces(&bf, 10), 0);
+    }
 }
 
 impl From<&super::atomic::PeerCountersAtomic> for PeerCounters {
@@ -50,24 +131,6 @@ impl From<&super::atomic::PeerCountersAtomic> for PeerCounters {
             total_piece_download_ms: counters.total_piece_download_ms.load(Ordering::Relaxed),
             times_i_stole: counters.times_i_stole.load(Ordering::Relaxed),
             times_stolen_from_me: counters.times_stolen_from_me.load(Ordering::Relaxed),
-        }
-    }
-}
-
-impl From<&Peer> for PeerStats {
-    fn from(peer: &Peer) -> Self {
-        let state = peer.get_state();
-        Self {
-            counters: peer.stats.counters.as_ref().into(),
-            state: state.name(),
-            conn_kind: match state {
-                PeerState::Live(l) => Some(l.connection_kind),
-                _ => None,
-            },
-            client_name: match state {
-                PeerState::Live(l) => l.client_name.clone(),
-                _ => None,
-            },
         }
     }
 }
